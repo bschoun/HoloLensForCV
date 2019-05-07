@@ -41,7 +41,7 @@ def pgm2distance(img, encoded=False):
     return img.astype(np.float)/1000.0
 
 
-def get_points(img, us, vs, cam2world, depth_range):
+def get_points(img, us, vs, cam2world, depth_range, no_inf=True):
     distance_img = pgm2distance(img, encoded=False)
 
     if cam2world is not None:
@@ -50,19 +50,56 @@ def get_points(img, us, vs, cam2world, depth_range):
     else:
         R, t = np.eye(3), np.zeros(3)
 
-    points = []
-    for i in np.arange(distance_img.shape[0]):
-        for j in np.arange(distance_img.shape[1]):
-            z = distance_img[i, j]
-            x = us[i, j]
-            y = vs[i, j]
-            if np.isinf(x) or np.isinf(y) or z < depth_range[0] or z > depth_range[1]:
-                continue
-            point = np.array([-x, -y, -1.])
-            point /= np.linalg.norm(point)
-            point = t + z * np.dot(R, point)
-            points.append(point.reshape((1, -1)))    
-    return np.vstack(points)
+    # Create a mask to remember which points to disregard in the end
+    mask = np.ones(distance_img.shape, dtype=bool)
+    mask[us==np.inf] = False
+    mask[vs==np.inf] = False
+    mask[distance_img > depth_range[1]] = False
+    mask[distance_img < depth_range[0]] = False
+
+    # Now fill in any np.inf values with 0's for easier processing
+    us[us == np.inf] = 0.0
+    vs[vs == np.inf] = 0.0
+    distance_img[distance_img > depth_range[1]] = 0.0
+    distance_img[distance_img < depth_range[0]] = 0.0
+
+    # Negate us and vs
+    us *= -1
+    vs *= -1
+
+    # Create a 3rd value with -1's
+    ones = np.ones(us.shape)*-1
+    
+    # Stack us (x), vs (y), and ones (z) depth-wise
+    points = np.dstack((us,vs,ones))
+
+    # Calculate the norm of each point (axis 2)
+    norm = np.linalg.norm(points,axis=2)
+
+    # Reshape in order to divide
+    points /= norm.reshape(norm.shape[0], norm.shape[1], 1)
+
+    # Apply rotation matrix to each element of array
+    shape = points.shape
+    points = points.reshape((-1, 3, 1))
+    points = R.dot(points.T).T
+    points = points.reshape(shape)
+
+    # Multiply by the distance image
+    points *= distance_img.reshape((distance_img.shape[0], distance_img.shape[1], 1))
+
+    # Apply translation
+    points += t
+
+    # Return a list of points with no infinity values
+    if no_inf:
+        return points[mask]
+
+    # Return the array in the original image shape, including np.inf values
+    else:
+        # Set bad points back to np.inf
+        points[mask==False] = np.inf
+        return points
 
 
 def get_cam2world(path, sensor_poses):
